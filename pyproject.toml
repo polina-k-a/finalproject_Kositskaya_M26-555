@@ -1,0 +1,28 @@
+[project]
+name = "valutatrade-hub"
+version = "0.1.0"
+description = "Console application for managing a virtual currency portfolio"
+readme = "README.md"
+authors = [{ name = "PolinaKA" }]
+requires-python = ">=3.14"
+dependencies = ["prettytable>=3.18.0"]
+
+[project.scripts]
+project = "valutatrade_hub.cli.interface:main"
+
+[build-system]
+requires = ["uv_build>=0.12.16,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = ""
+
+[dependency-groups]
+dev = ["ruff>=0.17.3"]
+
+[tool.ruff]
+target-version = "py314"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
