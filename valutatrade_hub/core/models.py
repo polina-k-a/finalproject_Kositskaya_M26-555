@@ -1,6 +1,9 @@
+"""Модели пользователя, валютного кошелька и портфеля."""
+
 import hashlib
 import math
-from datetime import datetime
+import os
+from datetime import datetime, timezone
 
 PASSWORD_HASH_ITERATIONS = 100_000
 EXCHANGE_RATES = {
@@ -10,6 +13,8 @@ EXCHANGE_RATES = {
     "BTC_USD": 60_000.0,
     "ETH_USD": 3_000.0,
 }
+PASSWORD_SALT_BYTES = 16
+BALANCE_ABS_TOLERANCE = 1e-12
 
 
 class User:
@@ -36,9 +41,9 @@ class User:
             raise ValueError("ID пользователя должен быть положительным")
 
         if not isinstance(hashed_password, str):
-            raise TypeError("Хэш пароля должен быть строкой")
+            raise TypeError("Хеш пароля должен быть строкой")
         if not hashed_password.strip():
-            raise ValueError("Хэш пароля не может быть пустым")
+            raise ValueError("Хеш пароля не может быть пустым")
 
         if not isinstance(salt, str):
             raise TypeError("Соль должна быть строкой")
@@ -53,6 +58,19 @@ class User:
         self._hashed_password = hashed_password
         self._salt = salt
         self._registration_date = registration_date
+
+    @classmethod
+    def create(cls, user_id: int, username: str, password: str) -> "User":
+        """Создать нового пользователя с исходным паролем."""
+        salt, hashed_password = cls.create_password_hash(password)
+
+        return cls(
+            user_id=user_id,
+            username=username,
+            hashed_password=hashed_password,
+            salt=salt,
+            registration_date=datetime.now(timezone.utc),
+        )
 
     @property
     def user_id(self) -> int:
@@ -80,7 +98,7 @@ class User:
 
     @property
     def hashed_password(self) -> str:
-        """Вернуть хэш пароля"""
+        """Вернуть хеш пароля"""
         return self._hashed_password
 
     @property
@@ -95,7 +113,8 @@ class User:
         print(f"Дата регистрации: {self.registration_date.isoformat()}")
 
     def change_password(self, new_password: str) -> None:
-        """Изменяет пароль пользователя, с хешированием нового пароля через PBKDF2-HMAC-SHA256"""
+        """Изменяет пароль пользователя,
+        с хешированием нового пароля через PBKDF2-HMAC-SHA256"""
         if not isinstance(new_password, str):
             raise TypeError("Пароль должен быть строкой")
         if len(new_password) < 4:
@@ -115,6 +134,24 @@ class User:
             "sha256", password.encode(), self._salt.encode(), PASSWORD_HASH_ITERATIONS
         ).hex()
         return hashed == self._hashed_password
+
+    @staticmethod
+    def create_password_hash(password: str) -> tuple[str, str]:
+        """Проверить новый пароль и вернуть соль и PBKDF2-HMAC-SHA256 хеш."""
+        if not isinstance(password, str):
+            raise TypeError("Пароль должен быть строкой")
+        if len(password) < 4:
+            raise ValueError("Пароль должен быть не короче 4 символов")
+
+        salt = os.urandom(PASSWORD_SALT_BYTES).hex()
+        hashed_password = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode(),
+            salt.encode(),
+            PASSWORD_HASH_ITERATIONS,
+        ).hex()
+
+        return salt, hashed_password
 
 
 class Wallet:
@@ -163,17 +200,28 @@ class Wallet:
         self._balance = new_balance
 
     def withdraw(self, amount: float) -> None:
-        """Снять указанную сумму при достаточном балансе."""
+        """Снять сумму, учитывая абсолютную погрешность полного снятия."""
         if isinstance(amount, bool) or not isinstance(amount, (int, float)):
             raise TypeError("Сумма для снятия с баланса должна быть числом")
         if amount <= 0 or not math.isfinite(amount):
             raise ValueError(
                 "Сумма для снятия с баланса должна быть положительным конечным числом"
             )
+        # float может дать 0.19999999999999998 вместо 0.2.
+        if self._balance > 0 and math.isclose(
+            amount,
+            self._balance,
+            rel_tol=0.0,
+            abs_tol=BALANCE_ABS_TOLERANCE,
+        ):
+            self._balance = 0.0
+            return
+
         if amount > self._balance:
             raise ValueError(
                 "На счету недостаточно средств.\n"
-                f"Текущий баланс: {self.balance} {self.currency_code}, требуется {amount} {self.currency_code}"
+                f"Текущий баланс: {self.balance} {self.currency_code}, "
+                f"требуется {amount} {self.currency_code}"
             )
         self._balance -= amount
 
@@ -183,7 +231,7 @@ class Wallet:
 
 
 class Portfolio:
-    """Портфолио валютных кошельков одного пользователя"""
+    """Портфель валютных кошельков одного пользователя"""
 
     _user_id: int
     _wallets: dict[str, Wallet]
@@ -195,7 +243,7 @@ class Portfolio:
         wallets: dict[str, Wallet] | None = None,
         user: User | None = None,
     ) -> None:
-        """Создать портфолио пользователя"""
+        """Создать портфель пользователя"""
         if isinstance(user_id, bool) or not isinstance(user_id, int):
             raise TypeError("ID пользователя должен быть целым числом")
         if user_id <= 0:
@@ -205,7 +253,7 @@ class Portfolio:
             if not isinstance(user, User):
                 raise TypeError("Пользователь должен быть объектом User")
             if user.user_id != user_id:
-                raise ValueError("ID пользователя не совпадает с владельцем портфолио")
+                raise ValueError("ID пользователя не совпадает с владельцем портфеля")
 
         if wallets is None:
             wallets = {}
@@ -224,7 +272,7 @@ class Portfolio:
 
     @property
     def user_id(self) -> int:
-        """Вернуть ID владельца портфолио"""
+        """Вернуть ID владельца портфеля"""
         return self._user_id
 
     @property
@@ -238,7 +286,7 @@ class Portfolio:
         return self._wallets.copy()
 
     def add_currency(self, currency_code: str) -> None:
-        """Добавить новый кошелёк в портфолио"""
+        """Добавить новый кошелёк в портфель"""
         if not isinstance(currency_code, str):
             raise TypeError("Код валюты должен быть строкой")
         if not currency_code.strip():
@@ -256,7 +304,8 @@ class Portfolio:
         base_currency: str = "USD",
         rates: dict[str, float] | None = None,
     ) -> float:
-        """Рассчитать общую стоимость всех валют пользователя в базовой валюте через USD."""
+        """Рассчитать общую стоимость всех валют пользователя
+        в базовой валюте через USD."""
         if not isinstance(base_currency, str):
             raise TypeError("Код базовой валюты должен быть строкой")
         if not base_currency.strip():
@@ -283,7 +332,8 @@ class Portfolio:
                 raise TypeError(f"Курс {pair} в словаре обмена должен быть числом")
             if not math.isfinite(rate) or rate <= 0:
                 raise ValueError(
-                    f"Курс {pair} в словаре обмена должен быть положительным конечным числом"
+                    f"Курс {pair} в словаре обмена должен быть положительным "
+                    "конечным числом"
                 )
 
             return float(rate)
