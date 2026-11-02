@@ -5,6 +5,8 @@ import math
 import os
 from datetime import datetime, timezone
 
+from valutatrade_hub.core.utils import format_balance
+
 PASSWORD_HASH_ITERATIONS = 100_000
 EXCHANGE_RATES = {
     "USD_USD": 1.0,
@@ -219,9 +221,10 @@ class Wallet:
 
         if amount > self._balance:
             raise ValueError(
-                "На счету недостаточно средств.\n"
-                f"Текущий баланс: {self.balance} {self.currency_code}, "
-                f"требуется {amount} {self.currency_code}"
+                f"Недостаточно средств: доступно "
+                f"{format_balance(self.balance, self.currency_code)} "
+                f"{self.currency_code}, требуется "
+                f"{format_balance(amount, self.currency_code)} {self.currency_code}"
             )
         self._balance -= amount
 
@@ -360,7 +363,8 @@ class Portfolio:
         code = currency_code.strip().upper()
         if code not in self._wallets:
             raise ValueError(
-                f"У пользователя с ID {self._user_id} нет кошелька '{code}'"
+                f"У вас нет кошелька '{code}'. Добавьте валюту: "
+                "она создаётся автоматически при первой покупке."
             )
 
         return self._wallets[code]

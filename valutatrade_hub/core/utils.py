@@ -1,4 +1,4 @@
-"""Чтение и безопасная запись JSON-файлов приложения."""
+"""Работа с JSON-файлами и вспомогательное форматирование сумм."""
 
 import json
 import os
@@ -11,6 +11,20 @@ DATA_DIR = PROJECT_ROOT / "data"
 USERS_FILE = DATA_DIR / "users.json"
 PORTFOLIOS_FILE = DATA_DIR / "portfolios.json"
 RATES_FILE = DATA_DIR / "rates.json"
+
+FIAT_BALANCE_PRECISION = 2
+CRYPTO_BALANCE_PRECISION = 4
+CRYPTO_CODES = {"BTC", "ETH", "SOL"}
+
+
+def format_balance(value: float, currency_code: str) -> str:
+    """Оформить сумму для вывода, не изменяя сохранённое значение."""
+    precision = (
+        CRYPTO_BALANCE_PRECISION
+        if currency_code in CRYPTO_CODES
+        else FIAT_BALANCE_PRECISION
+    )
+    return f"{value:.{precision}f}"
 
 
 def load_json(path: Path) -> list | dict:

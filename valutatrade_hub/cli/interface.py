@@ -1,18 +1,18 @@
 """Ввод команд, разбор аргументов и вывод сообщений CLI."""
 
 import shlex
+from datetime import datetime, timezone
 
 import prompt
 from prettytable import PrettyTable
 
 from valutatrade_hub.core import usecases
 from valutatrade_hub.core.models import User
+from valutatrade_hub.core.utils import CRYPTO_CODES, format_balance
 
-FIAT_BALANCE_PRECISION = 2
-CRYPTO_BALANCE_PRECISION = 4
 VALUE_PRECISION = 2
 RATE_PRECISION = 8
-CRYPTO_CODES = {"BTC", "ETH", "SOL"}
+DISPLAY_DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 USERNAME_OPTION = "--username"
 PASSWORD_OPTION = "--password"
@@ -152,7 +152,8 @@ def handle_register(options: dict[str, str | float]) -> None:
     )
     print(
         f"Пользователь '{user.username}' зарегистрирован "
-        f"(id={user.user_id}). Выполните login для входа."
+        f"(id={user.user_id}). "
+        f"Войдите: login --username {user.username} --password ****"
     )
 
 
@@ -191,13 +192,10 @@ def handle_show_portfolio(
 
     for wallet in result["wallets"]:
         code = wallet["currency_code"]
-        precision = (
-            CRYPTO_BALANCE_PRECISION if code in CRYPTO_CODES else FIAT_BALANCE_PRECISION
-        )
         table.add_row(
             [
                 code,
-                f"{wallet['balance']:.{precision}f}",
+                format_balance(wallet["balance"], code),
                 f"{wallet['value']:.{VALUE_PRECISION}f}",
             ]
         )
@@ -219,15 +217,19 @@ def handle_buy(
 
     code = result["currency_code"]
     print(
-        f"Покупка выполнена: {result['amount']} {code} "
-        f"по курсу {result['rate']:,.{VALUE_PRECISION}f} USD/{code}"
+        f"Покупка выполнена: {format_balance(result['amount'], code)} {code} "
+        f"по курсу {result['rate']:.{VALUE_PRECISION}f} USD/{code}"
     )
-    print(f"Баланс {code}: было {result['before']} → стало {result['after']}")
-    print(f"Списано: {result['value']:,.{VALUE_PRECISION}f} USD")
+    print("Изменения в портфеле:")
     print(
-        f"Баланс USD: было {result['usd_before']:,.{VALUE_PRECISION}f} "
+        f"- {code}: было {format_balance(result['before'], code)} "
+        f"→ стало {format_balance(result['after'], code)}"
+    )
+    print(
+        f"- USD: было {result['usd_before']:,.{VALUE_PRECISION}f} "
         f"→ стало {result['usd_after']:,.{VALUE_PRECISION}f}"
     )
+    print(f"Оценочная стоимость покупки: {result['value']:,.{VALUE_PRECISION}f} USD")
 
 
 def handle_sell(
@@ -243,11 +245,15 @@ def handle_sell(
 
     code = result["currency_code"]
     print(
-        f"Продажа выполнена: {result['amount']} {code} "
-        f"по курсу {result['rate']:,.{VALUE_PRECISION}f} USD/{code}"
+        f"Продажа выполнена: {format_balance(result['amount'], code)} {code} "
+        f"по курсу {result['rate']:.{VALUE_PRECISION}f} USD/{code}"
     )
-    print(f"Баланс {code}: было {result['before']} → стало {result['after']}")
-    print(f"Зачислено: {result['value']:,.{VALUE_PRECISION}f} USD")
+    print("Изменения в портфеле:")
+    print(
+        f"- {code}: было {format_balance(result['before'], code)} "
+        f"→ стало {format_balance(result['after'], code)}"
+    )
+    print(f"Оценочная выручка: {result['value']:,.{VALUE_PRECISION}f} USD")
     print(
         f"Баланс USD: было {result['usd_before']:,.{VALUE_PRECISION}f} "
         f"→ стало {result['usd_after']:,.{VALUE_PRECISION}f}"
@@ -261,8 +267,23 @@ def handle_get_rate(options: dict[str, str | float]) -> None:
 
     rate, updated_at = usecases.get_rate(from_code, to_code)
 
-    print(
-        f"Курс {from_code}→{to_code}: {rate:.{RATE_PRECISION}f} "
-        f"(обновлено: {updated_at})"
+    # В JSON остаётся ISO-дата в UTC; здесь меняется только её представление.
+    updated = datetime.fromisoformat(updated_at)
+    if updated.tzinfo is None:
+        updated = updated.replace(tzinfo=timezone.utc)
+    display_date = updated.astimezone(timezone.utc).strftime(DISPLAY_DATETIME_FORMAT)
+    # Малые курсы не обрезаем до двух знаков, даже для фиатных валют.
+    precision = (
+        RATE_PRECISION if rate < 1 or to_code in CRYPTO_CODES else VALUE_PRECISION
     )
-    print(f"Обратный курс {to_code}→{from_code}: {1 / rate:.{RATE_PRECISION}f}")
+    inverse_rate = 1 / rate
+    inverse_precision = (
+        RATE_PRECISION
+        if inverse_rate < 1 or from_code in CRYPTO_CODES
+        else VALUE_PRECISION
+    )
+
+    print(
+        f"Курс {from_code}→{to_code}: {rate:.{precision}f} (обновлено: {display_date})"
+    )
+    print(f"Обратный курс {to_code}→{from_code}: {inverse_rate:.{inverse_precision}f}")
