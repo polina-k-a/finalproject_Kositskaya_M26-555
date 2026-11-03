@@ -5,13 +5,6 @@ import os
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DATA_DIR = PROJECT_ROOT / "data"
-
-USERS_FILE = DATA_DIR / "users.json"
-PORTFOLIOS_FILE = DATA_DIR / "portfolios.json"
-RATES_FILE = DATA_DIR / "rates.json"
-
 FIAT_BALANCE_PRECISION = 2
 CRYPTO_BALANCE_PRECISION = 4
 CRYPTO_CODES = {"BTC", "ETH", "SOL"}

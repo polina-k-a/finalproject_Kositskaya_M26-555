@@ -11,3 +11,6 @@ wheels/
 
 # Ruff cache
 .ruff_cache/
+
+# Application logs
+logs/

@@ -7,8 +7,16 @@ import prompt
 from prettytable import PrettyTable
 
 from valutatrade_hub.core import usecases
+from valutatrade_hub.core.currencies import CURRENCY_REGISTRY
+from valutatrade_hub.core.exceptions import (
+    ApiRequestError,
+    CurrencyNotFoundError,
+    InsufficientFundsError,
+    ValutaTradeError,
+)
 from valutatrade_hub.core.models import User
 from valutatrade_hub.core.utils import CRYPTO_CODES, format_balance
+from valutatrade_hub.infra.settings import SettingsLoader
 
 VALUE_PRECISION = 2
 RATE_PRECISION = 8
@@ -122,14 +130,35 @@ def main() -> None:
                     handle_get_rate(options)
                 case _:
                     print(f"Неизвестная команда '{command}'. Введите help.")
-        except (TypeError, ValueError, OSError) as error:
+        except InsufficientFundsError as error:
+            print(f"Ошибка: {error}")
+        except CurrencyNotFoundError as error:
+            base_code = None
+            if command == "show-portfolio":
+                base_code = options.get(BASE_OPTION)
+                if base_code is None:
+                    base_code = SettingsLoader().get("default_base_currency")
+            if command == "show-portfolio" and base_code.strip().upper() == error.code:
+                print(f"Ошибка: Неизвестная базовая валюта '{error.code}'")
+            else:
+                print(f"Ошибка: {error}")
+            print("Введите 'help get-rate', чтобы посмотреть поддерживаемые валюты.")
+        except ApiRequestError as error:
+            print(f"Ошибка: {error}")
+            print("Проверьте подключение к сети или повторите попытку позже.")
+        except (ValutaTradeError, TypeError, ValueError, OSError) as error:
             print(f"Ошибка: {error}")
 
 
 def handle_help(arguments: list[str]) -> None:
-    """Показать синтаксис всех команд."""
+    """Показать общую справку или справку get-rate с поддерживаемыми валютами."""
+    if arguments == ["get-rate"]:
+        print(f"get-rate {FROM_OPTION} <валюта> {TO_OPTION} <валюта>")
+        print("Показать прямой и обратный курсы валют и время обновления.")
+        print("Поддерживаемые валюты: " + ", ".join(sorted(CURRENCY_REGISTRY)))
+        return
     if arguments:
-        print("Команда help не принимает аргументы")
+        print("Использование: help [get-rate]")
         return
 
     print(
@@ -139,7 +168,7 @@ def handle_help(arguments: list[str]) -> None:
         f"buy {CURRENCY_OPTION} <валюта> {AMOUNT_OPTION} <количество>\n"
         f"sell {CURRENCY_OPTION} <валюта> {AMOUNT_OPTION} <количество>\n"
         f"get-rate {FROM_OPTION} <валюта> {TO_OPTION} <валюта>\n"
-        "help\n"
+        "help [get-rate]\n"
         "exit"
     )
 
@@ -174,7 +203,7 @@ def handle_show_portfolio(
     """Показать таблицу кошельков и общую сумму."""
     result = usecases.show_portfolio(
         user_id=user.user_id,
-        base_currency=options.get(BASE_OPTION, "USD"),
+        base_currency=options.get(BASE_OPTION),
     )
 
     base = result["base"]
@@ -253,11 +282,11 @@ def handle_sell(
         f"- {code}: было {format_balance(result['before'], code)} "
         f"→ стало {format_balance(result['after'], code)}"
     )
-    print(f"Оценочная выручка: {result['value']:,.{VALUE_PRECISION}f} USD")
     print(
-        f"Баланс USD: было {result['usd_before']:,.{VALUE_PRECISION}f} "
+        f"- USD: было {result['usd_before']:,.{VALUE_PRECISION}f} "
         f"→ стало {result['usd_after']:,.{VALUE_PRECISION}f}"
     )
+    print(f"Оценочная выручка: {result['value']:,.{VALUE_PRECISION}f} USD")
 
 
 def handle_get_rate(options: dict[str, str | float]) -> None:

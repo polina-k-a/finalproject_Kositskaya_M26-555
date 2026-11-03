@@ -5,7 +5,7 @@ import math
 import os
 from datetime import datetime, timezone
 
-from valutatrade_hub.core.utils import format_balance
+from valutatrade_hub.core.exceptions import InsufficientFundsError
 
 PASSWORD_HASH_ITERATIONS = 100_000
 EXCHANGE_RATES = {
@@ -220,11 +220,10 @@ class Wallet:
             return
 
         if amount > self._balance:
-            raise ValueError(
-                f"Недостаточно средств: доступно "
-                f"{format_balance(self.balance, self.currency_code)} "
-                f"{self.currency_code}, требуется "
-                f"{format_balance(amount, self.currency_code)} {self.currency_code}"
+            raise InsufficientFundsError(
+                code=self.currency_code,
+                available=self.balance,
+                required=amount,
             )
         self._balance -= amount
 

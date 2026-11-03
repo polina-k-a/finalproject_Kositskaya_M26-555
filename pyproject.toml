@@ -27,3 +27,18 @@ line-length = 88
 [tool.ruff.lint]
 extend-select = ["E501"]
 select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.valutatrade]
+users_file = "data/users.json"
+portfolios_file = "data/portfolios.json"
+rates_file = "data/rates.json"
+rates_ttl_seconds = 300
+default_base_currency = "USD"
+initial_usd_balance = 10000.0
+logs_dir = "logs"
+actions_log_filename = "actions.log"
+log_date_format = "%Y-%m-%dT%H:%M:%S+00:00"
+log_level = "INFO"
+log_format = "%(levelname)s %(asctime)s %(message)s"
+log_max_bytes = 1048576
+log_backup_count = 3

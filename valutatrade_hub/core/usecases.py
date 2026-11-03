@@ -3,31 +3,35 @@
 import math
 from datetime import datetime, timezone
 
+from valutatrade_hub.core.currencies import get_currency
+from valutatrade_hub.core.exceptions import ApiRequestError
 from valutatrade_hub.core.models import EXCHANGE_RATES, Portfolio, User, Wallet
-from valutatrade_hub.core.utils import (
-    PORTFOLIOS_FILE,
-    RATES_FILE,
-    USERS_FILE,
-    load_json,
-    save_json,
+from valutatrade_hub.decorators import log_action
+from valutatrade_hub.infra.database import (
+    PORTFOLIOS_STORAGE,
+    RATES_STORAGE,
+    USERS_STORAGE,
+    DatabaseManager,
 )
-
-RATES_TTL_SECONDS = 300
-INITIAL_USD_BALANCE = 10_000.0
+from valutatrade_hub.infra.settings import SettingsLoader
 
 
 def register(
     username: str,
     password: str,
-    initial_balance: float = INITIAL_USD_BALANCE,
+    initial_balance: float | None = None,
 ) -> User:
     """Зарегистрировать пользователя с начальным виртуальным балансом USD."""
+    # None означает отсутствие аргумента; явный нулевой баланс допустим.
+    if initial_balance is None:
+        initial_balance = SettingsLoader().get("initial_usd_balance")
     # Проверяем начальный баланс правилами Wallet до изменения хранилища.
     usd_wallet = Wallet("USD", balance=initial_balance)
-    users = load_json(USERS_FILE)
+    database = DatabaseManager()
+    users = database.read(USERS_STORAGE)
     if not isinstance(users, list):
         raise ValueError("Файл пользователей должен содержать список")
-    portfolios = load_json(PORTFOLIOS_FILE)
+    portfolios = database.read(PORTFOLIOS_STORAGE)
     if not isinstance(portfolios, list):
         raise ValueError("Файл портфелей должен содержать список")
 
@@ -62,14 +66,14 @@ def register(
         }
     )
 
-    save_json(USERS_FILE, users)
+    database.write(USERS_STORAGE, users)
     try:
-        save_json(PORTFOLIOS_FILE, portfolios)
+        database.write(PORTFOLIOS_STORAGE, portfolios)
     except OSError as error:
         # Если портфель не сохранился, отменяем добавление пользователя.
-        # save_json сохраняет прежний целевой файл при неудачной записи.
+        # DatabaseManager сохраняет прежний файл при неудачной записи.
         try:
-            save_json(USERS_FILE, users[:-1])
+            database.write(USERS_STORAGE, users[:-1])
         except OSError as rollback_error:
             raise OSError(
                 "Не удалось сохранить портфель и отменить регистрацию. "
@@ -82,13 +86,14 @@ def register(
 
 def login(username: str, password: str) -> User:
     """Проверить данные входа и вернуть пользователя."""
+    database = DatabaseManager()
     if not isinstance(username, str):
         raise TypeError("Имя пользователя должно быть строкой")
     if not username.strip():
         raise ValueError("Имя пользователя должно быть не пустой строкой")
     if not isinstance(password, str):
         raise TypeError("Пароль должен быть строкой")
-    users = load_json(USERS_FILE)
+    users = database.read(USERS_STORAGE)
     if not isinstance(users, list):
         raise ValueError("Файл пользователей должен содержать список")
 
@@ -109,14 +114,9 @@ def login(username: str, password: str) -> User:
 
 def get_rate(from_code: str, to_code: str) -> tuple[float, str]:
     """Вернуть курс и время обновления через кеш или учебную заглушку."""
-    for code in (from_code, to_code):
-        if not isinstance(code, str):
-            raise TypeError("Код валюты должен быть строкой")
-        if not code.strip():
-            raise ValueError("Код валюты не может быть пустым")
-
-    from_code = from_code.strip().upper()
-    to_code = to_code.strip().upper()
+    # Проверяем реестр до сравнения кодов: XYZ -> XYZ тоже неизвестная валюта.
+    from_code = get_currency(from_code).code
+    to_code = get_currency(to_code).code
 
     now = datetime.now(timezone.utc)
 
@@ -124,10 +124,12 @@ def get_rate(from_code: str, to_code: str) -> tuple[float, str]:
     if from_code == to_code:
         return 1.0, now.isoformat()
 
+    database = DatabaseManager()
     try:
-        cache = load_json(RATES_FILE)
+        cache = database.read(RATES_STORAGE)
     except FileNotFoundError:
-        # Отсутствующий кеш восстановим из заглушки, остальные ошибки не перехватываем
+        # Отсутствующий кеш восстановим из заглушки.
+        # Остальные ошибки чтения не перехватываем.
         cache = {}
 
     if not isinstance(cache, dict):
@@ -146,14 +148,14 @@ def get_rate(from_code: str, to_code: str) -> tuple[float, str]:
             pair = f"{code}_USD"
             # Если в заглушке нет нужного курса, то бросаем исключение
             if pair not in EXCHANGE_RATES:
-                raise ValueError(f"Не удалось получить курс для {code}→USD")
+                raise ApiRequestError(f"Не удалось получить курс для {code}→USD")
 
             rate = EXCHANGE_RATES[pair]
 
             if isinstance(rate, bool) or not isinstance(rate, (int, float)):
-                raise ValueError(f"Курс {pair} в заглушке должен быть числом")
+                raise ApiRequestError(f"Курс {pair} в заглушке должен быть числом")
             if not math.isfinite(rate) or rate <= 0:
-                raise ValueError(
+                raise ApiRequestError(
                     f"Курс {pair} в заглушке должен быть положительным конечным числом"
                 )
 
@@ -171,7 +173,7 @@ def get_rate(from_code: str, to_code: str) -> tuple[float, str]:
         # Сохраняем после успешного получения всех недостающих курсов
         cache["source"] = "Stub"
         cache["last_refresh"] = now.isoformat()
-        save_json(RATES_FILE, cache)
+        database.write(RATES_STORAGE, cache)
 
     from_rate, from_updated_at = from_data
     to_rate, to_updated_at = to_data
@@ -179,7 +181,7 @@ def get_rate(from_code: str, to_code: str) -> tuple[float, str]:
     # FROM -> USD -> TO
     rate = from_rate / to_rate
     if not math.isfinite(rate) or rate <= 0:
-        raise ValueError(
+        raise ApiRequestError(
             f"Не удалось рассчитать положительный конечный курс {from_code}→{to_code}"
         )
     # Время получения курса - самый старый из двух курсов.
@@ -227,7 +229,7 @@ def _read_cached_rate(
 
     age = (now - updated_at).total_seconds()
     # Будущая дата также не подтверждает актуальность записи
-    if age < 0 or age >= RATES_TTL_SECONDS:
+    if age < 0 or age >= SettingsLoader().get("rates_ttl_seconds"):
         return None
 
     return float(rate), updated_at
@@ -238,12 +240,13 @@ def _load_portfolio(
     user: User | None = None,
 ) -> tuple[list, dict, Portfolio]:
     """Загрузить портфель, вернув список записей, нужную запись и модель."""
+    database = DatabaseManager()
     if isinstance(user_id, bool) or not isinstance(user_id, int):
         raise TypeError("ID пользователя должен быть целым числом")
     if user_id <= 0:
         raise ValueError("ID пользователя должен быть положительным")
 
-    portfolios = load_json(PORTFOLIOS_FILE)
+    portfolios = database.read(PORTFOLIOS_STORAGE)
     if not isinstance(portfolios, list):
         raise ValueError("Файл портфелей должен содержать список")
 
@@ -275,18 +278,19 @@ def _load_portfolio(
     return portfolios, portfolio_data, portfolio
 
 
-def show_portfolio(user_id: int, base_currency: str = "USD") -> dict:
+def show_portfolio(user_id: int, base_currency: str | None = None) -> dict:
     """Подготовить балансы и общую стоимость портфеля."""
     if isinstance(user_id, bool) or not isinstance(user_id, int):
         raise TypeError("ID пользователя должен быть целым числом")
     if user_id <= 0:
         raise ValueError("ID пользователя должен быть положительным")
 
-    if not isinstance(base_currency, str) or not base_currency.strip():
-        raise ValueError("Код валюты должен быть не пустой строкой")
-    base = base_currency.strip().upper()
+    if base_currency is None:
+        base_currency = SettingsLoader().get("default_base_currency")
+    base = get_currency(base_currency).code
 
-    users = load_json(USERS_FILE)
+    database = DatabaseManager()
+    users = database.read(USERS_STORAGE)
     if not isinstance(users, list):
         raise ValueError("Файл пользователей должен содержать список")
     user = None
@@ -333,11 +337,13 @@ def show_portfolio(user_id: int, base_currency: str = "USD") -> dict:
     }
 
 
+@log_action("BUY", verbose=True)
 def buy(user_id: int, currency_code: str, amount: float) -> dict:
     """Купить валюту за USD и сохранить оба баланса в портфеле"""
     return _execute_trade(user_id, currency_code, amount, buying=True)
 
 
+@log_action("SELL", verbose=True)
 def sell(user_id: int, currency_code: str, amount: float) -> dict:
     """Продать валюту за USD и сохранить оба баланса в портфеле"""
     return _execute_trade(user_id, currency_code, amount, buying=False)
@@ -355,11 +361,7 @@ def _execute_trade(
         raise TypeError("ID пользователя должен быть целым числом")
     if user_id <= 0:
         raise ValueError("ID пользователя должен быть положительным")
-    if not isinstance(currency_code, str):
-        raise TypeError("Код валюты должен быть строкой")
-    if not currency_code.strip():
-        raise ValueError("Код валюты не может быть пустым")
-    code = currency_code.strip().upper()
+    code = get_currency(currency_code).code
     if code == "USD":
         raise ValueError("Обмен USD на USD не осуществляется")
 
@@ -370,6 +372,7 @@ def _execute_trade(
         raise ValueError("Сумма должна быть положительным конечным числом")
     amount = float(amount)
 
+    database = DatabaseManager()
     portfolios, portfolio_data, portfolio = _load_portfolio(user_id)
     wallets = portfolio.wallets
 
@@ -413,7 +416,7 @@ def _execute_trade(
         wallet_code: {"balance": wallet.balance}
         for wallet_code, wallet in portfolio.wallets.items()
     }
-    save_json(PORTFOLIOS_FILE, portfolios)
+    database.write(PORTFOLIOS_STORAGE, portfolios)
 
     return {
         "currency_code": code,
@@ -424,4 +427,5 @@ def _execute_trade(
         "value": value,
         "usd_before": usd_before,
         "usd_after": usd_wallet.balance,
+        "base": "USD",
     }
