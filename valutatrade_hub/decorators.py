@@ -31,11 +31,13 @@ def log_action(action: str, verbose: bool = False) -> Callable:
         raise TypeError("Параметр verbose должен быть bool")
 
     def decorate(function: Callable) -> Callable:
+        """Подготовить обёртку и сохранить сигнатуру для чтения аргументов."""
         # Для логирования аргументы функции извлекаются через inspect.signature,
         function_signature = signature(function)
 
         @wraps(function)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
+            """Выполнить операцию и записать её результат либо исходное исключение."""
             logger = get_action_logger()
             fields = {
                 "action": action,

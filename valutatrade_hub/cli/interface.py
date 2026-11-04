@@ -17,6 +17,7 @@ from valutatrade_hub.core.exceptions import (
 from valutatrade_hub.core.models import User
 from valutatrade_hub.core.utils import CRYPTO_CODES, format_balance
 from valutatrade_hub.infra.settings import SettingsLoader
+from valutatrade_hub.logging_config import parser_console_logging
 
 VALUE_PRECISION = 2
 RATE_PRECISION = 8
@@ -29,6 +30,8 @@ AMOUNT_OPTION = "--amount"
 BASE_OPTION = "--base"
 FROM_OPTION = "--from"
 TO_OPTION = "--to"
+SOURCE_OPTION = "--source"
+TOP_OPTION = "--top"
 
 REQUIRED_OPTIONS = {
     "register": (USERNAME_OPTION, PASSWORD_OPTION),
@@ -37,13 +40,20 @@ REQUIRED_OPTIONS = {
     "buy": (CURRENCY_OPTION, AMOUNT_OPTION),
     "sell": (CURRENCY_OPTION, AMOUNT_OPTION),
     "get-rate": (FROM_OPTION, TO_OPTION),
+    "update-rates": (),
+    "show-rates": (),
+}
+OPTIONAL_OPTIONS = {
+    "show-portfolio": (BASE_OPTION,),
+    "update-rates": (SOURCE_OPTION,),
+    "show-rates": (CURRENCY_OPTION, TOP_OPTION, BASE_OPTION),
 }
 
 
 def parse_options(command: str, arguments: list[str]) -> dict[str, str | float]:
     """Разобрать пары флаг-значение и проверить аргументы команды."""
     required = REQUIRED_OPTIONS[command]
-    allowed = required + ((BASE_OPTION,) if command == "show-portfolio" else ())
+    allowed = required + OPTIONAL_OPTIONS.get(command, ())
     options = {}
 
     tokens = iter(arguments)
@@ -53,7 +63,7 @@ def parse_options(command: str, arguments: list[str]) -> dict[str, str | float]:
         if flag in options:
             raise ValueError(f"Аргумент '{flag}' указан несколько раз")
         value = next(tokens, None)
-        if value is None or value in allowed:
+        if value is None or value.startswith("--"):
             raise ValueError(f"Не указано значение аргумента '{flag}'")
 
         options[flag] = value
@@ -70,6 +80,11 @@ def parse_options(command: str, arguments: list[str]) -> dict[str, str | float]:
                 "Суммы для снятия и пополнения счета должны быть числами"
             ) from error
 
+    if TOP_OPTION in options:
+        try:
+            options[TOP_OPTION] = int(options[TOP_OPTION])
+        except ValueError as error:
+            raise ValueError("Аргумент --top должен быть целым числом") from error
     return options
 
 
@@ -128,6 +143,10 @@ def main() -> None:
                     handle_sell(options, current_user)
                 case "get-rate":
                     handle_get_rate(options)
+                case "update-rates":
+                    handle_update_rates(options)
+                case "show-rates":
+                    handle_show_rates(options)
                 case _:
                     print(f"Неизвестная команда '{command}'. Введите help.")
         except InsufficientFundsError as error:
@@ -168,6 +187,9 @@ def handle_help(arguments: list[str]) -> None:
         f"buy {CURRENCY_OPTION} <валюта> {AMOUNT_OPTION} <количество>\n"
         f"sell {CURRENCY_OPTION} <валюта> {AMOUNT_OPTION} <количество>\n"
         f"get-rate {FROM_OPTION} <валюта> {TO_OPTION} <валюта>\n"
+        f"update-rates [{SOURCE_OPTION} <coingecko|exchangerate>]\n"
+        f"show-rates [{CURRENCY_OPTION} <валюта>] [{TOP_OPTION} <N>] "
+        f"[{BASE_OPTION} <валюта>]\n"
         "help [get-rate]\n"
         "exit"
     )
@@ -316,3 +338,42 @@ def handle_get_rate(options: dict[str, str | float]) -> None:
         f"Курс {from_code}→{to_code}: {rate:.{precision}f} (обновлено: {display_date})"
     )
     print(f"Обратный курс {to_code}→{from_code}: {inverse_rate:.{inverse_precision}f}")
+
+
+def handle_update_rates(options: dict[str, str | float]) -> None:
+    """Включить консольные логи на время обновления и показать результат."""
+    with parser_console_logging():
+        result = usecases.update_rates(options.get(SOURCE_OPTION))
+    if result["errors"]:
+        print("Обновление завершено с ошибками. Подробности в logs/parser.log.")
+    else:
+        print("Обновление успешно завершено.")
+    print(
+        f"Обновлено курсов: {result['updated_count']}. "
+        f"Последнее обновление: {result['last_refresh']}"
+    )
+
+
+def handle_show_rates(options: dict[str, str | float]) -> None:
+    """Показать отфильтрованный кеш курсов таблицей PrettyTable."""
+    result = usecases.show_rates(
+        currency_code=options.get(CURRENCY_OPTION),
+        top=options.get(TOP_OPTION),
+        base_currency=options.get(BASE_OPTION, "USD"),
+    )
+    print(f"Курсы из кеша (обновление: {result['last_refresh']}):")
+    table = PrettyTable()
+    table.field_names = ["Пара", "Курс", "Обновлено (UTC)", "Состояние"]
+    for row in result["rows"]:
+        timestamp = datetime.fromisoformat(row["updated_at"])
+        table.add_row(
+            [
+                row["pair"],
+                f"{row['rate']:.{RATE_PRECISION}f}",
+                timestamp.strftime(DISPLAY_DATETIME_FORMAT),
+                "Устарел" if row["stale"] else "Свежий",
+            ]
+        )
+    print(table)
+    if any(row["stale"] for row in result["rows"]):
+        print("Для обновления устаревших курсов выполните update-rates.")

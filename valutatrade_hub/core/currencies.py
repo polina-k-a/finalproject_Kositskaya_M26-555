@@ -153,9 +153,11 @@ class CryptoCurrency(Currency):
 CURRENCY_REGISTRY: dict[str, Currency] = {
     "USD": FiatCurrency("USD", "US Dollar", "United States"),
     "EUR": FiatCurrency("EUR", "Euro", "Eurozone"),
+    "GBP": FiatCurrency("GBP", "Pound Sterling", "United Kingdom"),
     "RUB": FiatCurrency("RUB", "Russian Ruble", "Russia"),
     "BTC": CryptoCurrency("BTC", "Bitcoin", "SHA-256", 0.0),
     "ETH": CryptoCurrency("ETH", "Ethereum", "Ethash", 0.0),
+    "SOL": CryptoCurrency("SOL", "Solana", "Proof of History", 0.0),
 }
 
 

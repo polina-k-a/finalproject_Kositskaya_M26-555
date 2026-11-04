@@ -1,7 +1,11 @@
 """Работа с JSON-файлами и вспомогательное форматирование сумм."""
 
 import json
+import math
 import os
+from collections.abc import Callable
+from copy import deepcopy
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
@@ -18,6 +22,43 @@ def format_balance(value: float, currency_code: str) -> str:
         else FIAT_BALANCE_PRECISION
     )
     return f"{value:.{precision}f}"
+
+
+def validate_rate(value: float, pair: str) -> float:
+    """Вернуть положительный конечный курс или сообщить о неверном значении"""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"Курс {pair} должен быть числом")
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"Курс {pair} должен быть положительным конечным числом")
+    return float(value)
+
+
+def parse_utc_timestamp(value: str) -> datetime:
+    """Прочитать ISO-время; старые даты без часового пояса считать временем UTC."""
+    if not isinstance(value, str):
+        raise ValueError("Время обновления должно быть строкой ISO")
+    try:
+        timestamp = datetime.fromisoformat(value)
+    except ValueError as error:
+        raise ValueError("Некорректное время обновления курса") from error
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    return timestamp.astimezone(timezone.utc)
+
+
+def create_json_cache() -> Callable[[Path], list | dict]:
+    """Создать замыкание для кеширования чтения неизменившихся JSON-файлов."""
+    cached = {}
+
+    def read(path: Path) -> list | dict:
+        """Перечитать изменённый файл; вернуть копию для безопасного изменения."""
+        stat = path.stat()
+        version = (stat.st_mtime_ns, stat.st_size)
+        if path not in cached or cached[path][0] != version:
+            cached[path] = (version, load_json(path))
+        return deepcopy(cached[path][1])
+
+    return read
 
 
 def load_json(path: Path) -> list | dict:

@@ -8,9 +8,12 @@ wheels/
 
 # Virtual environments
 .venv
+.venv-wsl/
 
 # Ruff cache
 .ruff_cache/
 
 # Application logs
 logs/
+.uv-cache/
+.env

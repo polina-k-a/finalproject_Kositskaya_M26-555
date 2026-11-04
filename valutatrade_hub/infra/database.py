@@ -46,7 +46,15 @@ class DatabaseManager:
     def read(self, storage: str) -> list | dict:
         """Прочитать users, portfolios или rates по настроенному пути"""
         key = self._get_setting_key(storage)
-        return load_json(self._settings.get(key))
+        try:
+            data = load_json(self._settings.get(key))
+        except FileNotFoundError:
+            # При первом запуске установленного пакета файлов ещё нет.
+            if storage in (USERS_STORAGE, PORTFOLIOS_STORAGE):
+                data = []
+            else:
+                raise
+        return data
 
     def write(self, storage: str, data: list | dict) -> None:
         """Атомарно заменить содержимое одного JSON-файла."""

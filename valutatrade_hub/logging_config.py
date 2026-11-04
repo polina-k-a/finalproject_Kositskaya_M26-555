@@ -2,27 +2,62 @@
 
 import logging
 import time
+from contextlib import contextmanager
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from valutatrade_hub.infra.settings import LOGS_DIR_KEY, SettingsLoader
 
 ACTIONS_LOGGER_NAME = "valutatrade_hub.actions"
+PARSER_LOGGER_NAME = "valutatrade_hub.parser"
 
 
 def get_action_logger() -> logging.Logger:
     """Настроить и вернуть логгер, не добавляя повторные обработчики"""
     settings = SettingsLoader()
+    return _get_file_logger(
+        ACTIONS_LOGGER_NAME,
+        settings.get("actions_log_filename"),
+        settings.get("log_level"),
+    )
+
+
+def get_parser_logger() -> logging.Logger:
+    """Вернуть логгер парсера с подробными записями в отдельном файле."""
+    settings = SettingsLoader()
+    return _get_file_logger(
+        PARSER_LOGGER_NAME,
+        settings.get("parser_log_filename"),
+        settings.get("parser_log_level"),
+    )
+
+
+@contextmanager
+def parser_console_logging():
+    """Подключить краткие логи в консоль только на время update-rates."""
+    logger = get_parser_logger()
+    handler = logging.StreamHandler()
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+    logger.addHandler(handler)
+    try:
+        yield
+    finally:
+        logger.removeHandler(handler)
+        handler.close()
+
+
+def _get_file_logger(name: str, filename: str, level: str) -> logging.Logger:
+    """Применить общие настройки к файловому логгеру действий или парсера."""
+    settings = SettingsLoader()
     logs_dir = settings.get(LOGS_DIR_KEY)
-    filename = settings.get("actions_log_filename")
     log_path = logs_dir / filename
     max_bytes = settings.get("log_max_bytes")
     backup_count = settings.get("log_backup_count")
 
-    level = settings.get("log_level")
     formatter = _create_formatter(settings)
 
-    logger = logging.getLogger(ACTIONS_LOGGER_NAME)
+    logger = logging.getLogger(name)
     logger.setLevel(level)
     # Записи в файл, вывод пользовательских сообщений делает CLI
     logger.propagate = False

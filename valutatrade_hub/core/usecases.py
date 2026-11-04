@@ -3,17 +3,24 @@
 import math
 from datetime import datetime, timezone
 
-from valutatrade_hub.core.currencies import get_currency
+from valutatrade_hub.core.currencies import CryptoCurrency, get_currency
 from valutatrade_hub.core.exceptions import ApiRequestError
-from valutatrade_hub.core.models import EXCHANGE_RATES, Portfolio, User, Wallet
+from valutatrade_hub.core.models import Portfolio, User, Wallet
+from valutatrade_hub.core.utils import parse_utc_timestamp, validate_rate
 from valutatrade_hub.decorators import log_action
 from valutatrade_hub.infra.database import (
     PORTFOLIOS_STORAGE,
-    RATES_STORAGE,
     USERS_STORAGE,
     DatabaseManager,
 )
 from valutatrade_hub.infra.settings import SettingsLoader
+from valutatrade_hub.parser_service.config import (
+    COINGECKO_SOURCE,
+    EXCHANGERATE_SOURCE,
+    ParserConfig,
+)
+from valutatrade_hub.parser_service.storage import RatesStorage
+from valutatrade_hub.parser_service.updater import create_updater
 
 
 def register(
@@ -113,126 +120,134 @@ def login(username: str, password: str) -> User:
 
 
 def get_rate(from_code: str, to_code: str) -> tuple[float, str]:
-    """Вернуть курс и время обновления через кеш или учебную заглушку."""
-    # Проверяем реестр до сравнения кодов: XYZ -> XYZ тоже неизвестная валюта.
+    """Вернуть свежий курс; при устаревшем кеше обновить нужные источники."""
     from_code = get_currency(from_code).code
     to_code = get_currency(to_code).code
-
     now = datetime.now(timezone.utc)
-
-    # курс не нужен
     if from_code == to_code:
         return 1.0, now.isoformat()
 
-    database = DatabaseManager()
-    try:
-        cache = database.read(RATES_STORAGE)
-    except FileNotFoundError:
-        # Отсутствующий кеш восстановим из заглушки.
-        # Остальные ошибки чтения не перехватываем.
-        cache = {}
-
-    if not isinstance(cache, dict):
-        raise ValueError("Файл курсов должен содержать объект JSON")
-
-    # Получаем стоимости единицы обеих валют в USD из кэша
-    from_data = _read_cached_rate(from_code, cache, now)
-    to_data = _read_cached_rate(to_code, cache, now)
-
+    storage = RatesStorage(ParserConfig())
+    cache = storage.read_rates()
+    from_data = _read_cached_rate(from_code, cache["pairs"], now)
+    to_data = _read_cached_rate(to_code, cache["pairs"], now)
     if from_data is None or to_data is None:
+        sources = set()
         for code, data in ((from_code, from_data), (to_code, to_data)):
-            # Обновляем только отсутствующие или устаревшие курсы
-            if data is not None:
-                continue
-
-            pair = f"{code}_USD"
-            # Если в заглушке нет нужного курса, то бросаем исключение
-            if pair not in EXCHANGE_RATES:
-                raise ApiRequestError(f"Не удалось получить курс для {code}→USD")
-
-            rate = EXCHANGE_RATES[pair]
-
-            if isinstance(rate, bool) or not isinstance(rate, (int, float)):
-                raise ApiRequestError(f"Курс {pair} в заглушке должен быть числом")
-            if not math.isfinite(rate) or rate <= 0:
-                raise ApiRequestError(
-                    f"Курс {pair} в заглушке должен быть положительным конечным числом"
+            if data is None:
+                source = (
+                    COINGECKO_SOURCE
+                    if isinstance(get_currency(code), CryptoCurrency)
+                    else EXCHANGERATE_SOURCE
                 )
-
-            # Обновляем результат поиска
-            rate = float(rate)
-            cache[pair] = {
-                "rate": rate,
-                "updated_at": now.isoformat(),
-            }
-            if code == from_code:
-                from_data = (rate, now)
-            else:
-                to_data = (rate, now)
-
-        # Сохраняем после успешного получения всех недостающих курсов
-        cache["source"] = "Stub"
-        cache["last_refresh"] = now.isoformat()
-        database.write(RATES_STORAGE, cache)
+                sources.add(source)
+        # Один источник обновляем отдельно, два — одним общим запуском.
+        source = sources.pop() if len(sources) == 1 else None
+        create_updater(source).run_update()
+        now = datetime.now(timezone.utc)
+        cache = storage.read_rates()
+        from_data = _read_cached_rate(from_code, cache["pairs"], now)
+        to_data = _read_cached_rate(to_code, cache["pairs"], now)
+        if from_data is None or to_data is None:
+            raise ApiRequestError(
+                f"Свежий курс {from_code}→{to_code} недоступен. "
+                "Повторите позже или выполните update-rates."
+            )
 
     from_rate, from_updated_at = from_data
     to_rate, to_updated_at = to_data
-
-    # FROM -> USD -> TO
-    rate = from_rate / to_rate
-    if not math.isfinite(rate) or rate <= 0:
-        raise ApiRequestError(
-            f"Не удалось рассчитать положительный конечный курс {from_code}→{to_code}"
-        )
-    # Время получения курса - самый старый из двух курсов.
-    updated_at = min(from_updated_at, to_updated_at)
-
-    return rate, updated_at.isoformat()
+    try:
+        rate = validate_rate(from_rate / to_rate, f"{from_code}_{to_code}")
+    except (TypeError, ValueError) as error:
+        raise ApiRequestError(str(error)) from error
+    return rate, min(from_updated_at, to_updated_at).isoformat()
 
 
 def _read_cached_rate(
     code: str,
-    cache: dict,
+    pairs: dict,
     now: datetime,
 ) -> tuple[float, datetime] | None:
     """Вернуть свежий курс к USD или None, если требуется обновление."""
-    # курс не нужен
     if code == "USD":
         return 1.0, now
-
     pair = f"{code}_USD"
-    record = cache.get(pair)
-
+    record = pairs.get(pair)
     if record is None:
         return None
-    if not isinstance(record, dict):
-        raise ValueError(f"Некорректная запись курса {pair}")
-
-    rate = record.get("rate")
-    if isinstance(rate, bool) or not isinstance(rate, (int, float)):
-        raise ValueError(f"Курс {pair} должен быть числом")
-    if not math.isfinite(rate) or rate <= 0:
-        raise ValueError(f"Курс {pair} должен быть положительным конечным числом")
-
-    timestamp = record.get("updated_at")
-    if not isinstance(timestamp, str):
-        raise ValueError(f"У курса {pair} отсутствует время обновления")
-
-    try:
-        updated_at = datetime.fromisoformat(timestamp)
-    except ValueError as error:
-        raise ValueError(f"Некорректное время обновления курса {pair}") from error
-
-    # Даты без часового пояса считаем временем UTC
-    if updated_at.tzinfo is None:
-        updated_at = updated_at.replace(tzinfo=timezone.utc)
-
+    rate = validate_rate(record["rate"], pair)
+    updated_at = parse_utc_timestamp(record["updated_at"])
     age = (now - updated_at).total_seconds()
-    # Будущая дата также не подтверждает актуальность записи
     if age < 0 or age >= SettingsLoader().get("rates_ttl_seconds"):
         return None
+    return rate, updated_at
 
-    return float(rate), updated_at
+
+def update_rates(source: str | None = None) -> dict:
+    """Вручную обновить курсы выбранных источников."""
+    return create_updater(source).run_update()
+
+
+def show_rates(
+    currency_code: str | None = None,
+    top: int | None = None,
+    base_currency: str = "USD",
+) -> dict:
+    """Подготовить курсы из кеша без сетевых запросов и скрытия их возраста."""
+    base = get_currency(base_currency).code
+    if top is not None:
+        if isinstance(top, bool) or not isinstance(top, int) or top <= 0:
+            raise ValueError("Аргумент --top должен быть положительным целым числом")
+    cache = RatesStorage(ParserConfig()).read_rates()
+    pairs = cache["pairs"]
+    if not pairs:
+        raise ValueError(
+            "Локальный кеш курсов пуст. Выполните 'update-rates', "
+            "чтобы загрузить данные."
+        )
+    if currency_code is not None:
+        if not isinstance(currency_code, str) or not currency_code.strip():
+            raise ValueError("Код валюты должен быть непустой строкой")
+        currency_code = currency_code.strip().upper()
+        if currency_code != "USD" and f"{currency_code}_USD" not in pairs:
+            raise ValueError(f"Курс для '{currency_code}' не найден в кеше.")
+        get_currency(currency_code)
+    if base != "USD" and f"{base}_USD" not in pairs:
+        raise ValueError(f"Курс для '{base}' не найден в кеше.")
+    base_rate = 1.0 if base == "USD" else pairs[f"{base}_USD"]["rate"]
+    rows = []
+    now = datetime.now(timezone.utc)
+    codes = [pair.split("_")[0] for pair in pairs]
+    if currency_code == "USD":
+        codes = ["USD"]
+    for code in codes:
+        if currency_code is not None and code != currency_code:
+            continue
+        if top is not None and not isinstance(get_currency(code), CryptoCurrency):
+            continue
+        record = pairs.get(f"{code}_USD")
+        rate = 1.0 if code == "USD" else record["rate"]
+        times = []
+        if record is not None:
+            times.append(parse_utc_timestamp(record["updated_at"]))
+        if base != "USD":
+            times.append(parse_utc_timestamp(pairs[f"{base}_USD"]["updated_at"]))
+        updated_at = min(times) if times else now
+        age = (now - updated_at).total_seconds()
+        rows.append(
+            {
+                "pair": f"{code}_{base}",
+                "rate": validate_rate(rate / base_rate, f"{code}_{base}"),
+                "updated_at": updated_at.isoformat(),
+                "stale": age < 0 or age >= SettingsLoader().get("rates_ttl_seconds"),
+            }
+        )
+    if top is not None:
+        rows.sort(key=lambda row: row["rate"], reverse=True)
+        rows = rows[:top]
+    else:
+        rows.sort(key=lambda row: row["pair"])
+    return {"rows": rows, "last_refresh": cache["last_refresh"]}
 
 
 def _load_portfolio(
